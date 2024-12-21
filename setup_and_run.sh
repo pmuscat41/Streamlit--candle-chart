@@ -1,8 +1,7 @@
 #!/bin/bash
 
 # Create a virtual environment
-python3 -m venv env
-
+python3 -m venv envcd..
 # Activate the virtual environment
 source env/bin/activate
 

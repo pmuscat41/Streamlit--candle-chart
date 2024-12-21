@@ -1,95 +1,146 @@
 import streamlit as st
-import docx2txt
-import io
-import re
-from redlines import Redlines
-from itertools import zip_longest
-import base64
+import plotly.express as px
+import plotly.graph_objects as go
+import pandas as pd
+import yfinance as yf
+from datetime import datetime, timedelta
+import pytz
+import ta
 
-st.set_page_config(layout="wide")
+##########################################################################################
+## PART 1: Define Functions for Pulling, Processing, and Creating Techincial Indicators ##
+##########################################################################################
 
-
-def get_data():
-    if 'all_markdown' not in st.session_state:
-        st.session_state['all_markdown'] = []
-    return st.session_state['all_markdown']
-
-def read_word_or_text_file(file):
-    if file.type == "text/plain":
-        # Read text file
-
-        content = str(file.read(), "utf-8")
+# Fetch stock data based on the ticker, period, and interval
+def fetch_stock_data(ticker, period, interval):
+    end_date = datetime.now()
+    if period == '1wk':
+        start_date = end_date - timedelta(days=7)
+        data = yf.download(ticker, start=start_date, end=end_date, interval=interval)
     else:
-        # Read Word file
-        content = docx2txt.process(io.BytesIO(file.read()))
-    return content
+        data = yf.download(ticker, period=period, interval=interval)
+    return data
 
-def split_claims(content):
-    claims = re.split(r"\.(?=\s*\d)", content)
-    return [claim.strip() for claim in claims if claim.strip()]
+# Process data to ensure it is timezone-aware and has the correct format
+def process_data(data):
+    if data.index.tzinfo is None:
+        data.index = data.index.tz_localize('UTC')
+    data.index = data.index.tz_convert('US/Eastern')
+    data.reset_index(inplace=True)
+    data.rename(columns={'Date': 'Datetime'}, inplace=True)
+    return data
 
-def display_claims(claims1, claims2,mtype):
-    all_markdown = []
-    col1, col2, col3 = st.columns(3)  # Define columns
-    for i, (claim1, claim2) in enumerate(zip_longest(claims1, claims2)):
-        with col1:
-            if claim1 is not None:
-                st.text_area(f"Claim {i+1}", claim1, key=f"claim_{i+1}")
-        with col2:
-            if claim2 is not None:
-                st.text_area(f"Claim {i+1}", claim2, key=f"claim_b{i+1}")
-        with col3:
-            if claim1 is not None and claim2 is not None:
-                diff = Redlines(claim1, claim2, markdown_style=mtype)
-                opt = diff.output_markdown
-                st.markdown(opt+".\n", unsafe_allow_html=True)
-                all_markdown.append(opt)
-                all_markdown.append(".\n")
-            if claim1 is not None and claim2 is  None:
-                diff = Redlines(claim1, " ",markdown_style=mtype)
-                opt = diff.output_markdown
-                st.markdown(opt+".\n", unsafe_allow_html=True)
-                all_markdown.append(opt)
-                all_markdown.append(".\n")
-            if claim1 is  None and claim2 is not None:
-               diff=Redlines(" ", claim2, markdown_style=mtype)
-               opt = diff.output_markdown
-               st.markdown(opt+".\n", unsafe_allow_html=True)
-               all_markdown.append(opt)
-               all_markdown.append(".\n")
-    return '\n'.join(all_markdown)
-        
+# Calculate basic metrics from the stock data
+def calculate_metrics(data):
+    last_close = data['Close'].iloc[-1]
+    prev_close = data['Close'].iloc[0]
+    change = last_close - prev_close
+    pct_change = (change / prev_close) * 100
+    high = data['High'].max()
+    low = data['Low'].min()
+    volume = data['Volume'].sum()
+    return last_close, change, pct_change, high, low, volume
 
-def main():
-    st.sidebar.title("Claim Operations")
-    file1 = st.sidebar.file_uploader("Upload First File", type=['docx', 'txt'])
-    file2 = st.sidebar.file_uploader("Upload Second File", type=['docx', 'txt'])
+# Add simple moving average (SMA) and exponential moving average (EMA) indicators
+def add_technical_indicators(data):
+    data['SMA_20'] = ta.trend.sma_indicator(data['Close'], window=20)
+    data['EMA_20'] = ta.trend.ema_indicator(data['Close'], window=20)
+    return data
 
-    operation = st.sidebar.radio("Select Operation", ["Mark-up Claim Changes", "Print Markup"])
+###############################################
+## PART 2: Creating the Dashboard App layout ##
+###############################################
+
+
+# Set up Streamlit page layout
+st.set_page_config(layout="wide")
+st.title('Real Time Stock Dashboard')
+
+
+# 2A: SIDEBAR PARAMETERS ############
+
+# Sidebar for user input parameters
+st.sidebar.header('Chart Parameters')
+ticker = st.sidebar.text_input('Ticker', 'ADBE')
+time_period = st.sidebar.selectbox('Time Period', ['1d', '1wk', '1mo', '1y', 'max'])
+chart_type = st.sidebar.selectbox('Chart Type', ['Candlestick', 'Line'])
+indicators = st.sidebar.multiselect('Technical Indicators', ['SMA 20', 'EMA 20'])
+
+# Mapping of time periods to data intervals
+interval_mapping = {
+    '1d': '1m',
+    '1wk': '30m',
+    '1mo': '1d',
+    '1y': '1wk',
+    'max': '1wk'
+}
+
+
+# 2B: MAIN CONTENT AREA ############
+
+# Update the dashboard based on user input
+if st.sidebar.button('Update'):
+    data = fetch_stock_data(ticker, time_period, interval_mapping[time_period])
+    data = process_data(data)
+    data = add_technical_indicators(data)
     
-    mtype = st.sidebar.selectbox("Select markup type", ["red-green", "none", "red","ghfm"])
-
-
-    if operation == "Mark-up Claim Changes" and file1 is not None and file2 is not None:
-        content = read_word_or_text_file(file1)
-        current_claims = split_claims(content)
-        content_2 = read_word_or_text_file(file2)
-        new_claims_2 = split_claims(content_2)
+    last_close, change, pct_change, high, low, volume = calculate_metrics(data)
     
-        # Call display_claims and store the result in session state
-        st.session_state['all_markdown'] = display_claims(current_claims, new_claims_2,mtype)
+    # Display main metrics
+    st.metric(label=f"{ticker} Last Price", value=f"{last_close:.2f} USD", delta=f"{change:.2f} ({pct_change:.2f}%)")
+    
+    col1, col2, col3 = st.columns(3)
+    col1.metric("High", f"{high:.2f} USD")
+    col2.metric("Low", f"{low:.2f} USD")
+    col3.metric("Volume", f"{volume:,}")
+    
+    # Plot the stock price chart
+    fig = go.Figure()
+    if chart_type == 'Candlestick':
+        fig.add_trace(go.Candlestick(x=data['Datetime'],
+                                     open=data['Open'],
+                                     high=data['High'],
+                                     low=data['Low'],
+                                     close=data['Close']))
+    else:
+        fig = px.line(data, x='Datetime', y='Close')
+    
+    # Add selected technical indicators to the chart
+    for indicator in indicators:
+        if indicator == 'SMA 20':
+            fig.add_trace(go.Scatter(x=data['Datetime'], y=data['SMA_20'], name='SMA 20'))
+        elif indicator == 'EMA 20':
+            fig.add_trace(go.Scatter(x=data['Datetime'], y=data['EMA_20'], name='EMA 20'))
+    
+    # Format graph
+    fig.update_layout(title=f'{ticker} {time_period.upper()} Chart',
+                      xaxis_title='Time',
+                      yaxis_title='Price (USD)',
+                      height=600)
+    st.plotly_chart(fig, use_container_width=True)
+    
+    # Display historical data and technical indicators
+    st.subheader('Historical Data')
+    st.dataframe(data[['Datetime', 'Open', 'High', 'Low', 'Close', 'Volume']])
+    
+    st.subheader('Technical Indicators')
+    st.dataframe(data[['Datetime', 'SMA_20', 'EMA_20']])
 
-    if st.sidebar.button('Clear Screen'):
-        st.session_state['all_markdown'] = []
-        st.experimental_rerun()
-    if st.sidebar.button('Download'):
-        markdown_content = '\n'.join(st.session_state['all_markdown'])
-        b64 = base64.b64encode(markdown_content.encode()).decode()
-        href = f'<a href="data:text/plain;base64,{b64}" download="output2.md">Download Markdown</a>'
-        st.sidebar.markdown(href, unsafe_allow_html=True)
 
-    if operation == "Print Markup":
-        st.markdown(st.session_state['all_markdown'], unsafe_allow_html=True)
-        
-if __name__ == "__main__":
-    main()
+# 2C: SIDEBAR PRICES ############
+
+# Sidebar section for real-time stock prices of selected symbols
+st.sidebar.header('Real-Time Stock Prices')
+stock_symbols = ['AAPL', 'GOOGL', 'AMZN', 'MSFT']
+for symbol in stock_symbols:
+    real_time_data = fetch_stock_data(symbol, '1d', '1m')
+    if not real_time_data.empty:
+        real_time_data = process_data(real_time_data)
+        last_price = real_time_data['Close'].iloc[-1]
+        change = last_price - real_time_data['Open'].iloc[0]
+        pct_change = (change / real_time_data['Open'].iloc[0]) * 100
+        st.sidebar.metric(f"{symbol}", f"{last_price:.2f} USD", f"{change:.2f} ({pct_change:.2f}%)")
+
+# Sidebar information section
+st.sidebar.subheader('About')
+st.sidebar.info('This dashboard provides stock data and technical indicators for various time periods. Use the sidebar to customize your view.')
